@@ -9,16 +9,12 @@ export type TbColumnRole =
   | "Account Number"
   | "Account Name"
   | "Current Year Balance"
-  | "Prior Year 1 Balance"
-  | "Prior Year 2 Balance (Optional)"
-  | "Prior Year 3 Balance (Optional)";
+  | "Prior Year 1 Balance";
 
 export type CfColumnRole =
   | "Line Item Name"
   | "Current Year Amount"
-  | "Prior Year 1 Amount"
-  | "Prior Year 2 Amount (Optional)"
-  | "Prior Year 3 Amount (Optional)";
+  | "Prior Year 1 Amount";
 
 export type TbColumnSelection = Record<TbColumnRole, string>;
 export type CfColumnSelection = Record<CfColumnRole, string>;
@@ -30,16 +26,8 @@ export const TB_REQUIRED_MAP_ROLES: TbColumnRole[] = [
   "Prior Year 1 Balance",
 ];
 
-export const TB_OPTIONAL_MAP_ROLES: TbColumnRole[] = [
-  "Prior Year 2 Balance (Optional)",
-  "Prior Year 3 Balance (Optional)",
-];
-
 /** Full column-assignment field list in display order. */
-export const TB_MAP_ROLE_OPTIONS: TbColumnRole[] = [
-  ...TB_REQUIRED_MAP_ROLES,
-  ...TB_OPTIONAL_MAP_ROLES,
-];
+export const TB_MAP_ROLE_OPTIONS: TbColumnRole[] = [...TB_REQUIRED_MAP_ROLES];
 
 export const CF_REQUIRED_MAP_ROLES: CfColumnRole[] = [
   "Line Item Name",
@@ -47,15 +35,7 @@ export const CF_REQUIRED_MAP_ROLES: CfColumnRole[] = [
   "Prior Year 1 Amount",
 ];
 
-export const CF_OPTIONAL_MAP_ROLES: CfColumnRole[] = [
-  "Prior Year 2 Amount (Optional)",
-  "Prior Year 3 Amount (Optional)",
-];
-
-export const CF_MAP_ROLE_OPTIONS: CfColumnRole[] = [
-  ...CF_REQUIRED_MAP_ROLES,
-  ...CF_OPTIONAL_MAP_ROLES,
-];
+export const CF_MAP_ROLE_OPTIONS: CfColumnRole[] = [...CF_REQUIRED_MAP_ROLES];
 
 export function emptyTbColumnSelection(): TbColumnSelection {
   return {
@@ -63,8 +43,6 @@ export function emptyTbColumnSelection(): TbColumnSelection {
     "Account Name": "",
     "Current Year Balance": "",
     "Prior Year 1 Balance": "",
-    "Prior Year 2 Balance (Optional)": "",
-    "Prior Year 3 Balance (Optional)": "",
   };
 }
 
@@ -73,8 +51,6 @@ export function emptyCfColumnSelection(): CfColumnSelection {
     "Line Item Name": "",
     "Current Year Amount": "",
     "Prior Year 1 Amount": "",
-    "Prior Year 2 Amount (Optional)": "",
-    "Prior Year 3 Amount (Optional)": "",
   };
 }
 
@@ -84,15 +60,7 @@ function distinctNonEmpty(values: string[]) {
 }
 
 function collectTbMappedHeaders(sel: TbColumnSelection): string[] {
-  const out: string[] = [];
-  for (const role of TB_REQUIRED_MAP_ROLES) {
-    out.push(sel[role].trim());
-  }
-  for (const role of TB_OPTIONAL_MAP_ROLES) {
-    const t = sel[role]?.trim();
-    if (t) out.push(t);
-  }
-  return out;
+  return TB_REQUIRED_MAP_ROLES.map((role) => sel[role].trim());
 }
 
 export function validateTbMapping(
@@ -103,11 +71,6 @@ export function validateTbMapping(
   for (const role of TB_REQUIRED_MAP_ROLES) {
     const h = sel[role]?.trim();
     if (!h) return `Select a column for "${role}".`;
-    if (!headerSet.has(h)) return `Unknown column for "${role}": ${h}`;
-  }
-  for (const role of TB_OPTIONAL_MAP_ROLES) {
-    const h = sel[role]?.trim();
-    if (!h) continue;
     if (!headerSet.has(h)) return `Unknown column for "${role}": ${h}`;
   }
   const cols = collectTbMappedHeaders(sel);
@@ -127,18 +90,11 @@ export function validateCfMapping(
     if (!h) return `Select a column for "${role}".`;
     if (!headerSet.has(h)) return `Unknown column for "${role}": ${h}`;
   }
-  for (const role of CF_OPTIONAL_MAP_ROLES) {
-    const h = sel[role]?.trim();
-    if (!h) continue;
-    if (!headerSet.has(h)) return `Unknown column for "${role}": ${h}`;
-  }
   /** Amount columns may repeat the same physical column as one another; line text must be separate. */
   const lineOnly = sel["Line Item Name"].trim();
   const activityCols = [
     sel["Current Year Amount"].trim(),
     sel["Prior Year 1 Amount"].trim(),
-    sel["Prior Year 2 Amount (Optional)"]?.trim() ?? "",
-    sel["Prior Year 3 Amount (Optional)"]?.trim() ?? "",
   ].filter(Boolean);
   if (activityCols.includes(lineOnly)) {
     return `"Line Item Name" must map to a different column than amount columns.`;
@@ -146,25 +102,14 @@ export function validateCfMapping(
   return null;
 }
 
-function tbRowFinanciallyBlank(
-  cyBalance: number,
-  py1Balance: number,
-  py2?: number,
-  py3?: number,
-) {
-  if (cyBalance !== 0 || py1Balance !== 0) return false;
-  if (py2 !== undefined && py2 !== 0) return false;
-  if (py3 !== undefined && py3 !== 0) return false;
-  return true;
+function tbRowFinanciallyBlank(cyBalance: number, py1Balance: number) {
+  return cyBalance === 0 && py1Balance === 0;
 }
 
 export function transformTbWithColumnMap(
   data: Record<string, string>[],
   sel: TbColumnSelection,
 ): TrialBalanceReviewRow[] {
-  const py2Key = sel["Prior Year 2 Balance (Optional)"]?.trim();
-  const py3Key = sel["Prior Year 3 Balance (Optional)"]?.trim();
-
   const rows: TrialBalanceReviewRow[] = [];
   let i = 0;
   for (const r of data) {
@@ -172,11 +117,9 @@ export function transformTbWithColumnMap(
     const accountName = (r[sel["Account Name"]] ?? "").trim();
     const cyBalance = parseMoneyCell(r[sel["Current Year Balance"]]);
     const py1Balance = parseMoneyCell(r[sel["Prior Year 1 Balance"]]);
-    const py2Val = py2Key ? parseMoneyCell(r[py2Key]) : undefined;
-    const py3Val = py3Key ? parseMoneyCell(r[py3Key]) : undefined;
 
     if (!accountNumber && !accountName) {
-      if (tbRowFinanciallyBlank(cyBalance, py1Balance, py2Val, py3Val)) {
+      if (tbRowFinanciallyBlank(cyBalance, py1Balance)) {
         continue;
       }
     }
@@ -195,8 +138,6 @@ export function transformTbWithColumnMap(
       ...seededCoa,
       gaapCategory: deriveLegacyGaapCategory(seededCoa),
     };
-    if (py2Key) row.py2Balance = py2Val;
-    if (py3Key) row.py3Balance = py3Val;
     rows.push(row);
     i += 1;
   }
@@ -207,9 +148,6 @@ export function transformCfWithColumnMap(
   data: Record<string, string>[],
   sel: CfColumnSelection,
 ): { rows: CashFlowReviewRow[]; method: CfStatementMethod } {
-  const py2Key = sel["Prior Year 2 Amount (Optional)"]?.trim();
-  const py3Key = sel["Prior Year 3 Amount (Optional)"]?.trim();
-
   const lite: { lineItem: string }[] = [];
   for (const r of data) {
     const lineItem = (r[sel["Line Item Name"]] ?? "").trim();
@@ -224,8 +162,6 @@ export function transformCfWithColumnMap(
     if (!lineItem) continue;
     const cyBalance = parseMoneyCell(r[sel["Current Year Amount"]]);
     const py1Balance = parseMoneyCell(r[sel["Prior Year 1 Amount"]]);
-    const py2Balance = py2Key ? parseMoneyCell(r[py2Key]) : undefined;
-    const py3Balance = py3Key ? parseMoneyCell(r[py3Key]) : undefined;
     const category = defaultCfCategoryForLine(lineItem, method);
     const row: CashFlowReviewRow = {
       id: `cf-mapped-${i}`,
@@ -234,8 +170,6 @@ export function transformCfWithColumnMap(
       py1Balance,
       category,
     };
-    if (py2Key) row.py2Balance = py2Balance;
-    if (py3Key) row.py3Balance = py3Balance;
     rows.push(row);
     i += 1;
   }
@@ -265,12 +199,6 @@ export function guessTbMapping(headers: string[]): Partial<TbColumnSelection> {
     "Current Year Balance": firstHeaderMatching(headers, [
       /\bcy\b.*(bal|amt|amount|net)|(bal|amt|amount|net).*\bcy\b|current.*(year|yr|bal)|\by2\b|year\s*-?\s*0/i,
     ]),
-    "Prior Year 2 Balance (Optional)": firstHeaderMatching(headers, [
-      /\bpy2\b|\by-2\b|\by2\b.*(bal|amt|amount)/i,
-    ]),
-    "Prior Year 3 Balance (Optional)": firstHeaderMatching(headers, [
-      /\bpy3\b|\by-3\b|\by3\b.*(bal|amt|amount)/i,
-    ]),
   };
 }
 
@@ -284,12 +212,6 @@ export function guessCfMapping(headers: string[]): Partial<CfColumnSelection> {
     ]),
     "Current Year Amount": firstHeaderMatching(headers, [
       /\bcy\b|current|y2|amount.*cy/i,
-    ]),
-    "Prior Year 2 Amount (Optional)": firstHeaderMatching(headers, [
-      /\bpy2\b|y-2/i,
-    ]),
-    "Prior Year 3 Amount (Optional)": firstHeaderMatching(headers, [
-      /\bpy3\b|y-3/i,
     ]),
   };
 }

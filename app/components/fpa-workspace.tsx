@@ -294,6 +294,45 @@ function getChangedDriverKeys(
   return keys.filter((k) => prev[k] !== next[k]);
 }
 
+function mapForecastUpdatesToDriverInputs(
+  current: ScenarioDrivers,
+  next: NonNullable<FpaScenarioApiPayload["forecast_updates"]>,
+): ScenarioDriverInputs {
+  return {
+    revenueGrowth: clamp(
+      parseOptionalFinite(next.rev_growth) ?? current.revenueGrowth * 100,
+      -100,
+      100,
+    ).toFixed(2),
+    cogsMargin: clamp(
+      parseOptionalFinite(next.cogs_target) ?? current.cogsMargin * 100,
+      0,
+      100,
+    ).toFixed(2),
+    sgaGrowth: clamp(
+      parseOptionalFinite(next.sga_stepup) ?? current.sgaGrowth * 100,
+      -100,
+      100,
+    ).toFixed(2),
+  };
+}
+
+function mapForecastUpdatesToPercentPoints(
+  current: ScenarioDrivers,
+  next: NonNullable<FpaScenarioApiPayload["forecast_updates"]>,
+): {
+  revenueGrowth: number;
+  cogsMargin: number;
+  sgaGrowth: number;
+} {
+  const inputs = mapForecastUpdatesToDriverInputs(current, next);
+  return {
+    revenueGrowth: parseNumberInput(inputs.revenueGrowth),
+    cogsMargin: parseNumberInput(inputs.cogsMargin),
+    sgaGrowth: parseNumberInput(inputs.sgaGrowth),
+  };
+}
+
 export function FpaWorkspace() {
   const { trialBalance } = useStudioMemory();
   const fpaTotals = useFpaData(trialBalance);
@@ -309,6 +348,12 @@ export function FpaWorkspace() {
   const [aiScenarioData, setAiScenarioData] = useState<AiScenarioData | null>(null);
   const [simulating, setSimulating] = useState(false);
   const [simulateError, setSimulateError] = useState<string | null>(null);
+  const [isSimulationActive, setIsSimulationActive] = useState(false);
+  const [simulationDisplayPercents, setSimulationDisplayPercents] = useState<{
+    revenueGrowth: number;
+    cogsMargin: number;
+    sgaGrowth: number;
+  } | null>(null);
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizon>("annual");
   const activeDriverInputs = forecastDrivers;
   const activeForecastDrivers = useMemo(() => inputsToDrivers(forecastDrivers), [forecastDrivers]);
@@ -710,13 +755,9 @@ export function FpaWorkspace() {
     updateDriverInput(key, clamped.toFixed(2));
   }
 
-  const applyAiScenarioUpdates = useCallback(
-    (nextForecast: ScenarioDriverInputs | null) => {
-      if (!nextForecast) {
-        setAiUpdatedFields({});
-        return;
-      }
-      const changed = getChangedDriverKeys(activeDriverInputs, nextForecast);
+  const flashDriverFieldDiff = useCallback(
+    (prev: ScenarioDriverInputs, next: ScenarioDriverInputs) => {
+      const changed = getChangedDriverKeys(prev, next);
       if (changed.length > 0) {
         const marker: Partial<Record<keyof ScenarioDriverInputs, boolean>> = {};
         for (const k of changed) marker[k] = true;
@@ -725,9 +766,8 @@ export function FpaWorkspace() {
       } else {
         setAiUpdatedFields({});
       }
-      setForecastDrivers(nextForecast);
     },
-    [activeDriverInputs],
+    [],
   );
 
   const simulateScenario = useCallback(async () => {
@@ -738,6 +778,7 @@ export function FpaWorkspace() {
     }
     setSimulateError(null);
     setSimulating(true);
+    const prevDriverInputStrings: ScenarioDriverInputs = { ...forecastDrivers };
     const snapshot = inputsToDrivers(forecastDrivers);
     try {
       const res = await fetch("/api/chat", {
@@ -762,35 +803,29 @@ export function FpaWorkspace() {
       const raw: unknown = await res.json().catch(() => null);
       if (res.ok && raw && typeof raw === "object") {
         const data = raw as FpaScenarioApiPayload;
-        const mapDriverResponse = (
-          current: ScenarioDrivers,
-          next: {
-            rev_growth?: number;
-            cogs_target?: number;
-            sga_stepup?: number;
-          },
-        ): ScenarioDriverInputs => ({
-          revenueGrowth: clamp(
-            parseOptionalFinite(next.rev_growth) ?? current.revenueGrowth * 100,
-            -100,
-            100,
-          ).toFixed(2),
-          cogsMargin: clamp(
-            parseOptionalFinite(next.cogs_target) ?? current.cogsMargin * 100,
-            0,
-            100,
-          ).toFixed(2),
-          sgaGrowth: clamp(
-            parseOptionalFinite(next.sga_stepup) ?? current.sgaGrowth * 100,
-            -100,
-            100,
-          ).toFixed(2),
-        });
-        const resolvedDriverInputs = data.forecast_updates
-          ? mapDriverResponse(snapshot, data.forecast_updates)
-          : null;
-        applyAiScenarioUpdates(resolvedDriverInputs);
-        const driversForFy2 = inputsToDrivers(resolvedDriverInputs ?? forecastDrivers);
+        const fu = data.forecast_updates;
+        const hasForecastUpdates =
+          fu !== null &&
+          fu !== undefined &&
+          typeof fu === "object" &&
+          (Number.isFinite(Number((fu as { rev_growth?: unknown }).rev_growth)) ||
+            Number.isFinite(Number((fu as { cogs_target?: unknown }).cogs_target)) ||
+            Number.isFinite(Number((fu as { sga_stepup?: unknown }).sga_stepup)));
+
+        let resolvedForModel: ScenarioDriverInputs | null = null;
+        if (hasForecastUpdates) {
+          resolvedForModel = mapForecastUpdatesToDriverInputs(snapshot, fu);
+          setForecastDrivers(resolvedForModel);
+          setIsSimulationActive(true);
+          setSimulationDisplayPercents(mapForecastUpdatesToPercentPoints(snapshot, fu));
+          flashDriverFieldDiff(prevDriverInputStrings, resolvedForModel);
+        } else {
+          setIsSimulationActive(false);
+          setSimulationDisplayPercents(null);
+          setAiUpdatedFields({});
+        }
+
+        const driversForFy2 = inputsToDrivers(resolvedForModel ?? prevDriverInputStrings);
         const modelForFy2 = computeForecastModel(trialBalance, driversForFy2);
         if (typeof data.cfo_insight === "string" && data.cfo_insight.trim()) {
           setCfoInsight(data.cfo_insight.trim());
@@ -883,7 +918,11 @@ export function FpaWorkspace() {
         return;
       }
       const inferred = inferScenarioFromNaturalLanguage(prompt, snapshot);
-      applyAiScenarioUpdates(toDriverInputState(inferred.drivers));
+      const inferredInputs = toDriverInputState(inferred.drivers);
+      setIsSimulationActive(false);
+      setSimulationDisplayPercents(null);
+      setForecastDrivers(inferredInputs);
+      flashDriverFieldDiff(prevDriverInputStrings, inferredInputs);
       setCfoInsight(inferred.cfoInsight);
       setAiHighlightRows(inferred.aiHighlightRows);
       setAiScenarioData(null);
@@ -894,7 +933,11 @@ export function FpaWorkspace() {
       }
     } catch {
       const inferred = inferScenarioFromNaturalLanguage(prompt, snapshot);
-      applyAiScenarioUpdates(toDriverInputState(inferred.drivers));
+      const inferredInputs = toDriverInputState(inferred.drivers);
+      setIsSimulationActive(false);
+      setSimulationDisplayPercents(null);
+      setForecastDrivers(inferredInputs);
+      flashDriverFieldDiff(prevDriverInputStrings, inferredInputs);
       setCfoInsight(inferred.cfoInsight);
       setAiHighlightRows(inferred.aiHighlightRows);
       setAiScenarioData(null);
@@ -903,7 +946,7 @@ export function FpaWorkspace() {
       setSimulating(false);
     }
   }, [
-    applyAiScenarioUpdates,
+    flashDriverFieldDiff,
     forecastDrivers,
     nlScenario,
     cyCogsActual,
@@ -911,7 +954,6 @@ export function FpaWorkspace() {
     cySgaActual,
     currentBalances,
     activeForecastModel.forecast.sga,
-    forecastDrivers,
     startingCash,
     trialBalance,
   ]);
@@ -921,6 +963,8 @@ export function FpaWorkspace() {
       cyRevenueActual > EPSILON_KPI ? (cyCogsActual / cyRevenueActual) * 100 : 0;
     setAiScenarioData(null);
     setNlScenario("");
+    setIsSimulationActive(false);
+    setSimulationDisplayPercents(null);
     setForecastDrivers({
       revenueGrowth: "0.00",
       cogsMargin: historicalCogsPct.toFixed(2),
@@ -994,65 +1038,125 @@ export function FpaWorkspace() {
           <section className="rounded-2xl border border-slate-800/90 bg-slate-900/35 p-6 shadow-lg ring-1 ring-white/5">
             <div className="space-y-5">
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                <label className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
-                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                    Revenue growth %
-                  </span>
-                  <input
-                    type="number"
-                    min={-100}
-                    max={100}
-                    step={0.01}
-                    value={activeDriverInputs.revenueGrowth}
-                    onChange={(e) => updateDriverInput("revenueGrowth", e.target.value)}
-                    onBlur={() => clampPercentInputOnBlur("revenueGrowth", -100, 100)}
-                    className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
-                      aiUpdatedFields.revenueGrowth
-                        ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
-                        : "border-slate-700 ring-cyan-300/0"
-                    }`}
-                  />
-                </label>
+                <div className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                      Revenue growth %
+                    </span>
+                    {isSimulationActive && simulationDisplayPercents ? (
+                      <span
+                        className="shrink-0 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200"
+                        title="AI forecast_updates · rev_growth"
+                      >
+                        AI
+                      </span>
+                    ) : null}
+                  </div>
+                  {isSimulationActive && simulationDisplayPercents ? (
+                    <div
+                      className="text-xl font-bold tabular-nums text-cyan-400"
+                      aria-live="polite"
+                    >
+                      {simulationDisplayPercents.revenueGrowth.toFixed(2)}%
+                    </div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={-100}
+                      max={100}
+                      step={0.01}
+                      aria-label="Revenue growth percent"
+                      value={activeDriverInputs.revenueGrowth}
+                      onChange={(e) => updateDriverInput("revenueGrowth", e.target.value)}
+                      onBlur={() => clampPercentInputOnBlur("revenueGrowth", -100, 100)}
+                      className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
+                        aiUpdatedFields.revenueGrowth
+                          ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
+                          : "border-slate-700 focus:border-cyan-500/40 focus:ring-cyan-500/20"
+                      }`}
+                    />
+                  )}
+                </div>
 
-                <label className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
-                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                    Target COGS %
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={0.01}
-                    value={activeDriverInputs.cogsMargin}
-                    onChange={(e) => updateDriverInput("cogsMargin", e.target.value)}
-                    onBlur={() => clampPercentInputOnBlur("cogsMargin", 0, 100)}
-                    className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
-                      aiUpdatedFields.cogsMargin
-                        ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
-                        : "border-slate-700 ring-cyan-300/0"
-                    }`}
-                  />
-                </label>
+                <div className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                      Target COGS %
+                    </span>
+                    {isSimulationActive && simulationDisplayPercents ? (
+                      <span
+                        className="shrink-0 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200"
+                        title="AI forecast_updates · cogs_target"
+                      >
+                        AI
+                      </span>
+                    ) : null}
+                  </div>
+                  {isSimulationActive && simulationDisplayPercents ? (
+                    <div
+                      className="text-xl font-bold tabular-nums text-cyan-400"
+                      aria-live="polite"
+                    >
+                      {simulationDisplayPercents.cogsMargin.toFixed(2)}%
+                    </div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      aria-label="Target COGS percent"
+                      value={activeDriverInputs.cogsMargin}
+                      onChange={(e) => updateDriverInput("cogsMargin", e.target.value)}
+                      onBlur={() => clampPercentInputOnBlur("cogsMargin", 0, 100)}
+                      className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
+                        aiUpdatedFields.cogsMargin
+                          ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
+                          : "border-slate-700 focus:border-cyan-500/40 focus:ring-cyan-500/20"
+                      }`}
+                    />
+                  )}
+                </div>
 
-                <label className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
-                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                    SG&amp;A step-up %
-                  </span>
-                  <input
-                    type="number"
-                    min={-100}
-                    max={100}
-                    step={0.01}
-                    value={activeDriverInputs.sgaGrowth}
-                    onChange={(e) => updateDriverInput("sgaGrowth", e.target.value)}
-                    onBlur={() => clampPercentInputOnBlur("sgaGrowth", -100, 100)}
-                    className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
-                      aiUpdatedFields.sgaGrowth
-                        ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
-                        : "border-slate-700 ring-cyan-300/0"
-                    }`}
-                  />
-                </label>
+                <div className="space-y-2 rounded-xl border border-slate-800/80 bg-slate-950/55 p-4 ring-1 ring-white/5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                      SG&amp;A step-up %
+                    </span>
+                    {isSimulationActive && simulationDisplayPercents ? (
+                      <span
+                        className="shrink-0 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200"
+                        title="AI forecast_updates · sga_stepup"
+                      >
+                        AI
+                      </span>
+                    ) : null}
+                  </div>
+                  {isSimulationActive && simulationDisplayPercents ? (
+                    <div
+                      className="text-xl font-bold tabular-nums text-cyan-400"
+                      aria-live="polite"
+                    >
+                      {simulationDisplayPercents.sgaGrowth.toFixed(2)}%
+                    </div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={-100}
+                      max={100}
+                      step={0.01}
+                      aria-label="SG&A step-up percent"
+                      value={activeDriverInputs.sgaGrowth}
+                      onChange={(e) => updateDriverInput("sgaGrowth", e.target.value)}
+                      onBlur={() => clampPercentInputOnBlur("sgaGrowth", -100, 100)}
+                      className={`w-full rounded-lg border bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:ring-2 ${
+                        aiUpdatedFields.sgaGrowth
+                          ? "border-emerald-400 ring-2 ring-emerald-300/50 bg-emerald-500/10"
+                          : "border-slate-700 focus:border-cyan-500/40 focus:ring-cyan-500/20"
+                      }`}
+                    />
+                  )}
+                </div>
               </div>
             </div>
           </section>

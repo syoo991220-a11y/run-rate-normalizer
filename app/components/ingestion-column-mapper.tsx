@@ -45,7 +45,7 @@ export function IngestionColumnMapper({
   const subtitle =
     variant === "tb"
       ? "Assign each system field to a column from your file. Amounts should be net (debits and credits combined) for each fiscal year."
-      : "Map line item name, current year amount, prior year 1 amount, and optional prior year 2 and 3 amounts. Beginning and ending cash are tagged in Stage 2 using the category dropdown — not here.";
+      : "Map line item name, current year amount, and prior year 1 amount. Beginning and ending cash are tagged in Stage 2 using the category dropdown — not here.";
 
   const additionalImported = Math.max(0, totalDataRows - PREVIEW_ROW_COUNT);
 
