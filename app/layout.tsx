@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import { StudioMemoryProvider } from "./context/studio-memory-context";
 import { TopNav } from "./components/top-nav";
@@ -45,6 +46,7 @@ function RootLayout({
             </main>
           </div>
         </StudioMemoryProvider>
+        <Analytics debug={true} />
       </body>
     </html>
   );
