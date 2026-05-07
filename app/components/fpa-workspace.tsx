@@ -6,7 +6,6 @@ import { useCallback, useMemo, useState } from "react";
 import { useStudioMemory } from "../context/studio-memory-context";
 import { useFpaData } from "../hooks/use-fpa-data";
 import {
-  type ForecastModel,
   type ScenarioDrivers,
   computeForecastModel,
 } from "../hooks/use-forecast-model";
@@ -88,10 +87,32 @@ function sumTrialBalanceByL1(rows: TrialBalanceLine[], l1: string) {
   }, 0);
 }
 
+function sumTrialBalanceByL1Year(
+  rows: TrialBalanceLine[],
+  l1: string,
+  year: "cy" | "py1",
+) {
+  return rows.reduce((sum, row) => {
+    if ((row.categoryL1 ?? "").trim() !== l1) return sum;
+    const raw = year === "cy" ? row.cyBalance : row.py1Balance;
+    const n = Number(raw);
+    return sum + (Number.isFinite(n) ? Math.abs(n) : 0);
+  }, 0);
+}
+
 function sumTrialBalanceByL2(rows: TrialBalanceLine[], l2: string) {
   return rows.reduce((sum, row) => {
     if ((row.categoryL2 ?? "").trim() !== l2) return sum;
     const n = Number(row.cyBalance);
+    return sum + (Number.isFinite(n) ? Math.abs(n) : 0);
+  }, 0);
+}
+
+function sumTrialBalanceCashByYear(rows: TrialBalanceLine[], year: "cy" | "py1") {
+  return rows.reduce((sum, row) => {
+    if ((row.categoryL3 ?? "").trim() !== "Cash & Equivalents") return sum;
+    const raw = year === "cy" ? row.cyBalance : row.py1Balance;
+    const n = Number(raw);
     return sum + (Number.isFinite(n) ? Math.abs(n) : 0);
   }, 0);
 }
@@ -182,22 +203,30 @@ function computeAiCashImpactIndex(
 }
 
 function buildManualActiveForecastMonths(
-  model: ForecastModel,
+  annualProjection: {
+    revenue: number;
+    cogs: number;
+    sga: number;
+    operatingIncome: number;
+    operating_cash_flow: number;
+    investing_cash_flow: number;
+    financing_cash_flow: number;
+  },
   startingCash: number,
   highlightMonthIndex: number,
 ): ActiveForecastMonth[] {
-  const revM = model.forecast.revenue / 12;
-  const cogsM = model.forecast.cogs / 12;
-  const sgaM = model.forecast.sga / 12;
-  const oiM = model.forecast.operatingIncome / 12;
-  const invM = -Math.max(0, (model.forecast.revenue * 0.018) / 12);
-  const finM = -Math.abs((model.forecast.revenue * 0.002) / 12);
+  const revM = annualProjection.revenue / 12;
+  const cogsM = annualProjection.cogs / 12;
+  const sgaM = annualProjection.sga / 12;
+  const oiM = annualProjection.operatingIncome / 12;
+  const opcfM = annualProjection.operating_cash_flow / 12;
+  const invM = annualProjection.investing_cash_flow / 12;
+  const finM = annualProjection.financing_cash_flow / 12;
   const out: ActiveForecastMonth[] = [];
   let prev = startingCash;
   for (let i = 0; i < 12; i += 1) {
     const m = MONTHS[i]!;
-    const opcf = oiM;
-    const net = opcf + invM + finM;
+    const net = opcfM + invM + finM;
     prev += net;
     out.push({
       month: m,
@@ -206,7 +235,7 @@ function buildManualActiveForecastMonths(
       cogs: cogsM,
       opex: sgaM,
       operatingIncome: oiM,
-      operating_cash_flow: opcf,
+      operating_cash_flow: opcfM,
       investing_cash_flow: invM,
       financing_cash_flow: finM,
       ending_cash_balance: prev,
@@ -245,10 +274,8 @@ function buildAiActiveForecastMonths(
     const opcf = Number(row.operating_cash_flow) || Number(row.operating_cash) || 0;
     const inv = Number(row.investing_cash_flow) || 0;
     const fin = Number(row.financing_cash_flow) || 0;
-    const rowEndingRaw = Number(row.ending_cash_balance) || Number(row.endingCash);
     rolling += opcf + inv + fin;
-    const ending =
-      Number.isFinite(rowEndingRaw) && rowEndingRaw !== 0 ? rowEndingRaw : rolling;
+    const ending = rolling;
     rolling = ending;
     out.push({
       month,
@@ -333,11 +360,49 @@ function mapForecastUpdatesToPercentPoints(
   };
 }
 
+function toPctString(value: number) {
+  return value.toFixed(2);
+}
+
+function computeHistoricalDriverInputDefaults(
+  trialBalance: TrialBalanceLine[],
+): ScenarioDriverInputs {
+  const pyRevenue = sumTrialBalanceByL1Year(trialBalance, "Revenue", "py1");
+  const cyRevenue = sumTrialBalanceByL1Year(trialBalance, "Revenue", "cy");
+  const cyCogs = sumTrialBalanceByL1Year(trialBalance, "COGS", "cy");
+  const pySga = sumTrialBalanceByL1Year(trialBalance, "SG&A", "py1");
+  const cySga = sumTrialBalanceByL1Year(trialBalance, "SG&A", "cy");
+
+  const revenueGrowthPct =
+    pyRevenue > EPSILON_KPI ? ((cyRevenue - pyRevenue) / pyRevenue) * 100 : 0;
+  const cogsTargetPct = cyRevenue > EPSILON_KPI ? (cyCogs / cyRevenue) * 100 : 0;
+  const sgaStepupPct = pySga > EPSILON_KPI ? ((cySga - pySga) / pySga) * 100 : 0;
+
+  return {
+    revenueGrowth: toPctString(revenueGrowthPct),
+    cogsMargin: toPctString(cogsTargetPct),
+    sgaGrowth: toPctString(sgaStepupPct),
+  };
+}
+
+function forceOutflowBelowZero(value: number) {
+  return value > 0 ? -value : value;
+}
+
+function normalizeOutflowForChart(value: number, isExplicitInflow?: boolean) {
+  if (isExplicitInflow) return value;
+  return forceOutflowBelowZero(value);
+}
+
 export function FpaWorkspace() {
-  const { trialBalance } = useStudioMemory();
+  const { trialBalance, cashFlowLines } = useStudioMemory();
+  const historicalDriverDefaults = useMemo(
+    () => computeHistoricalDriverInputDefaults(trialBalance),
+    [trialBalance],
+  );
   const fpaTotals = useFpaData(trialBalance);
-  const [forecastDrivers, setForecastDrivers] = useState<ScenarioDriverInputs>(
-    toDriverInputState(BASELINE_FORECAST_DRIVERS),
+  const [forecastDrivers, setForecastDrivers] = useState<ScenarioDriverInputs>(() =>
+    computeHistoricalDriverInputDefaults(trialBalance),
   );
   const [nlScenario, setNlScenario] = useState("");
   const [cfoInsight, setCfoInsight] = useState(CFO_INSIGHT_DEFAULT);
@@ -361,22 +426,100 @@ export function FpaWorkspace() {
     () => computeForecastModel(trialBalance, BASELINE_FORECAST_DRIVERS),
     [trialBalance],
   );
-  const activeForecastModel = useMemo(
-    () => computeForecastModel(trialBalance, activeForecastDrivers),
-    [activeForecastDrivers, trialBalance],
-  );
 
   const hasTrialBalanceData = trialBalance.length > 0;
 
   const startingCash = useMemo(() => {
+    const cyCash = sumTrialBalanceCashByYear(trialBalance, "cy");
+    if (Number.isFinite(cyCash) && cyCash > 0) return cyCash;
     const wc = fpaTotals.currentAssetsCy - fpaTotals.currentLiabilitiesCy;
     if (Number.isFinite(wc) && wc > 0) return wc;
     return 0;
-  }, [fpaTotals.currentAssetsCy, fpaTotals.currentLiabilitiesCy]);
+  }, [fpaTotals.currentAssetsCy, fpaTotals.currentLiabilitiesCy, trialBalance]);
+  const pyEndingCashActual = useMemo(
+    () => sumTrialBalanceCashByYear(trialBalance, "py1"),
+    [trialBalance],
+  );
+  const cyEndingCashActual = useMemo(
+    () => sumTrialBalanceCashByYear(trialBalance, "cy"),
+    [trialBalance],
+  );
+  const historicalCashFlowTotals = useMemo(() => {
+    const totals = {
+      py: { operating: 0, investing: 0, financing: 0 },
+      cy: { operating: 0, investing: 0, financing: 0 },
+    };
+    for (const row of cashFlowLines) {
+      const category = (row.category ?? "").trim();
+      if (!category || category === "Beginning Cash Balance" || category === "Ending Cash Balance") {
+        continue;
+      }
+      if (category === "Supplemental / Non-Operating") continue;
+
+      const cy = Number(row.cyBalance);
+      const py1 = Number(row.py1Balance);
+      const cyAmount = Number.isFinite(cy) ? cy : 0;
+      const pyAmount = Number.isFinite(py1) ? py1 : 0;
+
+      if (category.startsWith("Operating")) {
+        totals.cy.operating += cyAmount;
+        totals.py.operating += pyAmount;
+      } else if (category === "Investing Activities") {
+        totals.cy.investing += cyAmount;
+        totals.py.investing += pyAmount;
+      } else if (category === "Financing Activities") {
+        totals.cy.financing += cyAmount;
+        totals.py.financing += pyAmount;
+      }
+    }
+    return totals;
+  }, [cashFlowLines]);
 
   const cyRevenueActual = useMemo(() => sumTrialBalanceByL1(trialBalance, "Revenue"), [trialBalance]);
   const cyCogsActual = useMemo(() => sumTrialBalanceByL1(trialBalance, "COGS"), [trialBalance]);
   const cySgaActual = useMemo(() => sumTrialBalanceByL1(trialBalance, "SG&A"), [trialBalance]);
+  const cyOperatingIncomeActual = cyRevenueActual - cyCogsActual - cySgaActual;
+  const baselineManualProjection = useMemo(() => {
+    const calcRevGrowth = activeForecastDrivers.revenueGrowth;
+    const calcCogsTarget = activeForecastDrivers.cogsMargin;
+    const calcSgaStepup = activeForecastDrivers.sgaGrowth;
+    const operatingCfRatio =
+      Math.abs(cyOperatingIncomeActual) > EPSILON_KPI
+        ? historicalCashFlowTotals.cy.operating / cyOperatingIncomeActual
+        : 0;
+    const investingCfRatio =
+      Math.abs(cyRevenueActual) > EPSILON_KPI
+        ? historicalCashFlowTotals.cy.investing / cyRevenueActual
+        : 0;
+
+    const fy1Revenue = cyRevenueActual * (1 + calcRevGrowth);
+    const fy1Cogs = fy1Revenue * calcCogsTarget;
+    const fy1Sga = cySgaActual * (1 + calcSgaStepup);
+    const fy1OperatingIncome = fy1Revenue - fy1Cogs - fy1Sga;
+    const fy1OperatingCashFlow = fy1OperatingIncome * operatingCfRatio;
+    const fy1InvestingCashFlow = fy1Revenue * investingCfRatio;
+    const fy1FinancingCashFlow = historicalCashFlowTotals.cy.financing;
+
+    return {
+      revenue: fy1Revenue,
+      cogs: fy1Cogs,
+      sga: fy1Sga,
+      operatingIncome: fy1OperatingIncome,
+      operating_cash_flow: fy1OperatingCashFlow,
+      investing_cash_flow: forceOutflowBelowZero(fy1InvestingCashFlow),
+      financing_cash_flow: forceOutflowBelowZero(fy1FinancingCashFlow),
+    };
+  }, [
+    activeForecastDrivers.cogsMargin,
+    activeForecastDrivers.revenueGrowth,
+    activeForecastDrivers.sgaGrowth,
+    cyOperatingIncomeActual,
+    cyRevenueActual,
+    cySgaActual,
+    historicalCashFlowTotals.cy.financing,
+    historicalCashFlowTotals.cy.investing,
+    historicalCashFlowTotals.cy.operating,
+  ]);
   const currentBalances = useMemo(() => {
     const ppe = sumTrialBalanceByL2(trialBalance, "Property, Plant & Equipment (PPE)");
     const intangible = sumTrialBalanceByL2(trialBalance, "Intangible Assets");
@@ -414,9 +557,9 @@ export function FpaWorkspace() {
         operatingIncome: Number(row.operating_income) || 0,
       }));
     }
-    const oiM = activeForecastModel.forecast.operatingIncome / 12;
+    const oiM = baselineManualProjection.operatingIncome / 12;
     return MONTHS.map((m) => ({ period: m, operatingIncome: oiM }));
-  }, [aiScenarioData, activeForecastModel.forecast.operatingIncome]);
+  }, [aiScenarioData, baselineManualProjection.operatingIncome]);
 
   const aiCashImpactMonthIndex = useMemo(
     () => computeAiCashImpactIndex(revenueOiSeriesForHighlight),
@@ -435,13 +578,13 @@ export function FpaWorkspace() {
       );
     }
     return buildManualActiveForecastMonths(
-      activeForecastModel,
+      baselineManualProjection,
       startingCash,
       aiCashImpactMonthIndex,
     );
   }, [
     aiScenarioData,
-    activeForecastModel,
+    baselineManualProjection,
     startingCash,
     cyCogsActual,
     cyRevenueActual,
@@ -496,34 +639,14 @@ export function FpaWorkspace() {
     const fy1Revenue = activeForecastKpis.fy1Revenue;
     const fy1Oi = activeForecastKpis.fy1OperatingIncome;
 
-    const projectFy2 = (drivers: ScenarioDrivers, fy1Rev: number, fy1SgaAbs: number) => {
-      const rev = fy1Rev * (1 + drivers.revenueGrowth);
-      const cogs = rev * drivers.cogsMargin;
-      const sga = fy1SgaAbs * (1 + drivers.sgaGrowth);
-      return rev - cogs - sga;
-    };
-
-    const fy1SgaAbs = activeForecastData.reduce((s, m) => s + m.opex, 0);
-
-    const fy2Revenue =
-      aiScenarioData?.annualProjection?.fy2.revenue ??
-      fy1Revenue * (1 + activeForecastDrivers.revenueGrowth);
-    const fy2Oi =
-      aiScenarioData?.annualProjection?.fy2.operatingIncome ??
-      projectFy2(activeForecastDrivers, fy1Revenue, fy1SgaAbs);
-
     return [
       { month: "PY", period: "PY", revenue: pyRevenue, operatingIncome: pyOi },
       { month: "CY", period: "CY", revenue: cyRevenue, operatingIncome: cyOi },
       { month: "FY+1", period: "FY+1", revenue: fy1Revenue, operatingIncome: fy1Oi },
-      { month: "FY+2", period: "FY+2", revenue: fy2Revenue, operatingIncome: fy2Oi },
     ];
   }, [
-    activeForecastData,
-    activeForecastDrivers,
     activeForecastKpis.fy1OperatingIncome,
     activeForecastKpis.fy1Revenue,
-    aiScenarioData,
     cyCogsActual,
     cyRevenueActual,
     cySgaActual,
@@ -549,87 +672,56 @@ export function FpaWorkspace() {
         revenue: fy1Rev,
         operatingIncome: activeForecastKpis.fy1OperatingIncome,
       },
-      {
-        year: "FY+2",
-        revenue:
-          aiScenarioData?.annualProjection?.fy2.revenue ??
-          activeForecastModel.forecast.revenue * (1 + activeForecastDrivers.revenueGrowth),
-        operatingIncome:
-          aiScenarioData?.annualProjection?.fy2.operatingIncome ??
-          (activeForecastModel.forecast.revenue * (1 + activeForecastDrivers.revenueGrowth) -
-            activeForecastModel.forecast.revenue *
-              (1 + activeForecastDrivers.revenueGrowth) *
-              activeForecastDrivers.cogsMargin -
-            activeForecastModel.forecast.sga * (1 + activeForecastDrivers.sgaGrowth)),
-      },
     ];
 
     const aiProj = aiScenarioData?.annualProjection;
 
-    return yearRows.reduce<
-      {
-        year: string;
-        operating_cash_flow: number;
-        investing_cash_flow: number;
-        financing_cash_flow: number;
-        ending_cash_balance: number;
-        aiImpact: boolean;
-      }[]
-    >((acc, row, i) => {
+    return yearRows.map((row) => {
       const operatingCash =
         row.year === "FY+1" && aiProj
           ? aiProj.fy1.operating_cash_flow
-          : row.year === "FY+2" && aiProj
-            ? aiProj.fy2.operating_cash_flow
-            : row.year === "FY+1"
-              ? activeForecastData.reduce((s, m) => s + m.operating_cash_flow, 0)
-              : row.operatingIncome;
+          : row.year === "FY+1"
+            ? activeForecastData.reduce((s, m) => s + m.operating_cash_flow, 0)
+            : row.year === "PY"
+              ? historicalCashFlowTotals.py.operating
+              : historicalCashFlowTotals.cy.operating;
       const investingOut =
         row.year === "FY+1" && aiProj
           ? aiProj.fy1.investing_cash_flow
-          : row.year === "FY+2" && aiProj
-            ? aiProj.fy2.investing_cash_flow
-            : row.year === "FY+1"
-              ? activeForecastData.reduce((s, m) => s + m.investing_cash_flow, 0)
-              : -Math.abs(row.revenue * (i <= 1 ? 0.018 : 0.022));
+          : row.year === "FY+1"
+            ? activeForecastData.reduce((s, m) => s + m.investing_cash_flow, 0)
+            : row.year === "PY"
+              ? historicalCashFlowTotals.py.investing
+              : historicalCashFlowTotals.cy.investing;
       const financingOut =
         row.year === "FY+1" && aiProj
           ? aiProj.fy1.financing_cash_flow
-          : row.year === "FY+2" && aiProj
-            ? aiProj.fy2.financing_cash_flow
-            : row.year === "FY+1"
-              ? activeForecastData.reduce((s, m) => s + m.financing_cash_flow, 0)
-              : -Math.abs(row.revenue * (i >= 2 ? -0.004 : 0.003));
-      const net = operatingCash + investingOut + financingOut;
-      const prev = acc.length ? acc[acc.length - 1]!.ending_cash_balance : startingCash;
+          : row.year === "FY+1"
+            ? activeForecastData.reduce((s, m) => s + m.financing_cash_flow, 0)
+            : row.year === "PY"
+              ? historicalCashFlowTotals.py.financing
+              : historicalCashFlowTotals.cy.financing;
       const endingCash =
-        row.year === "FY+1" && aiProj
-          ? aiProj.fy1.ending_cash_balance
-          : row.year === "FY+2" && aiProj
-            ? aiProj.fy2.ending_cash_balance
-            : row.year === "FY+1" && activeForecastData.length
+        row.year === "PY"
+          ? pyEndingCashActual
+          : row.year === "CY"
+            ? cyEndingCashActual
+            : activeForecastData.length
               ? activeForecastData[activeForecastData.length - 1]!.ending_cash_balance
-              : prev + net;
-      acc.push({
+              : startingCash + operatingCash + investingOut + financingOut;
+      return {
         year: row.year,
         operating_cash_flow: operatingCash,
-        investing_cash_flow: investingOut,
-        financing_cash_flow: financingOut,
+        investing_cash_flow: normalizeOutflowForChart(investingOut),
+        financing_cash_flow: normalizeOutflowForChart(financingOut),
         ending_cash_balance: endingCash,
         aiImpact: false,
-      });
-      return acc;
-    }, []);
+      };
+    });
   }, [
     activeForecastData,
-    activeForecastDrivers.cogsMargin,
-    activeForecastDrivers.revenueGrowth,
-    activeForecastDrivers.sgaGrowth,
     activeForecastKpis.fy1OperatingIncome,
     activeForecastKpis.fy1Revenue,
-    activeForecastModel.forecast.operatingIncome,
-    activeForecastModel.forecast.revenue,
-    activeForecastModel.forecast.sga,
     aiScenarioData,
     cyCogsActual,
     cyRevenueActual,
@@ -637,6 +729,9 @@ export function FpaWorkspace() {
     baselineModel.pyActuals.cogs,
     baselineModel.pyActuals.revenue,
     baselineModel.pyActuals.sga,
+    cyEndingCashActual,
+    historicalCashFlowTotals,
+    pyEndingCashActual,
     startingCash,
   ]);
 
@@ -681,8 +776,14 @@ export function FpaWorkspace() {
       activeForecastData.map((m) => ({
         month: m.month,
         operating_cash_flow: m.operating_cash_flow,
-        investing_cash_flow: m.investing_cash_flow,
-        financing_cash_flow: m.financing_cash_flow,
+        investing_cash_flow: normalizeOutflowForChart(
+          m.investing_cash_flow,
+          (m as ActiveForecastMonth & { investing_is_inflow?: boolean }).investing_is_inflow,
+        ),
+        financing_cash_flow: normalizeOutflowForChart(
+          m.financing_cash_flow,
+          (m as ActiveForecastMonth & { financing_is_inflow?: boolean }).financing_is_inflow,
+        ),
         ending_cash_balance: m.ending_cash_balance,
         aiImpact: m.aiImpact,
       })),
@@ -953,28 +1054,21 @@ export function FpaWorkspace() {
     cyRevenueActual,
     cySgaActual,
     currentBalances,
-    activeForecastModel.forecast.sga,
     startingCash,
     trialBalance,
   ]);
 
   const handleResetToBaseline = useCallback(() => {
-    const historicalCogsPct =
-      cyRevenueActual > EPSILON_KPI ? (cyCogsActual / cyRevenueActual) * 100 : 0;
     setAiScenarioData(null);
     setNlScenario("");
     setIsSimulationActive(false);
     setSimulationDisplayPercents(null);
-    setForecastDrivers({
-      revenueGrowth: "0.00",
-      cogsMargin: historicalCogsPct.toFixed(2),
-      sgaGrowth: "0.00",
-    });
+    setForecastDrivers(historicalDriverDefaults);
     setCfoInsight(CFO_INSIGHT_DEFAULT);
     setAiHighlightRows([]);
     setAiUpdatedFields({});
     setSimulateError(null);
-  }, [cyCogsActual, cyRevenueActual]);
+  }, [historicalDriverDefaults]);
 
   return (
     <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-8 px-4 py-10 sm:px-6 lg:px-10">

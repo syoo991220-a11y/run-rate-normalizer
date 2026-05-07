@@ -145,7 +145,7 @@ export function FpaChartsPanel({
           </h3>
           <p className="mt-1 text-xs text-slate-500">
             {timeHorizon === "annual"
-              ? "Annual strategic view (PY, CY, FY+1, FY+2) for the active forecast."
+              ? "Annual strategic view (PY, CY, FY+1) for the active forecast."
               : "Monthly runway view (Jan-Dec) for the active forecast with revenue bars and operating income trend."}
           </p>
           <div className="mt-4 h-80 min-h-[280px]">
@@ -263,7 +263,6 @@ export function FpaChartsPanel({
                 <Legend verticalAlign="bottom" height={40} />
                 <Bar
                   yAxisId="left"
-                  stackId="a"
                   dataKey="operating_cash_flow"
                   name="Operating cash"
                   fill="#10b981"
@@ -271,7 +270,6 @@ export function FpaChartsPanel({
                 />
                 <Bar
                   yAxisId="left"
-                  stackId="a"
                   dataKey="investing_cash_flow"
                   name="Investing (outflow)"
                   fill="#f59e0b"
@@ -287,7 +285,6 @@ export function FpaChartsPanel({
                 </Bar>
                 <Bar
                   yAxisId="left"
-                  stackId="a"
                   dataKey="financing_cash_flow"
                   name="Financing (outflow)"
                   fill="#64748b"
