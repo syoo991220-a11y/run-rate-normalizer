@@ -46,7 +46,7 @@ function RootLayout({
             </main>
           </div>
         </StudioMemoryProvider>
-        <Analytics debug={true} />
+        <Analytics />
       </body>
     </html>
   );
